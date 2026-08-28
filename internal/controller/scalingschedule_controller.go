@@ -148,6 +148,7 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		*replicas = ptr.To(decision.Replicas)
 		if err := r.Update(ctx, target); err != nil {
 			r.setReady(&sched, metav1.ConditionFalse, tidev1alpha1.ReasonScaleFailed, err.Error())
+			recordDecision(sched.Namespace, sched.Name, decision.Replicas, false)
 			// Best-effort status, then let the error drive a backoff retry.
 			_ = r.patchStatus(ctx, &sched, base)
 			return ctrl.Result{}, err
@@ -216,10 +217,16 @@ func targetKind(sched *tidev1alpha1.ScalingSchedule) tidev1alpha1.TargetKind {
 }
 
 func reasonFor(decision schedule.Decision) string {
-	if decision.WindowName == "" {
+	switch {
+	case decision.Held && decision.WindowName != "":
+		return fmt.Sprintf("scale-down delay holding window %q replicas", decision.WindowName)
+	case decision.Held:
+		return "scale-down delay holding default replicas"
+	case decision.WindowName == "":
 		return "no active window, applying default replicas"
+	default:
+		return fmt.Sprintf("window %q active", decision.WindowName)
 	}
-	return fmt.Sprintf("window %q active", decision.WindowName)
 }
 
 // conflictWinner returns the name of the schedule entitled to manage this

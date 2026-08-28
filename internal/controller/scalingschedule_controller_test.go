@@ -7,6 +7,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	tidev1alpha1 "github.com/alexli8408/tide/api/v1alpha1"
 )
@@ -372,6 +374,44 @@ func TestReconcileStatefulSetTarget(t *testing.T) {
 	}
 	if *got.Spec.Replicas != 5 {
 		t.Fatalf("want statefulset scaled to 5, got %d", *got.Spec.Replicas)
+	}
+}
+
+func TestMetricsOnScaleFailure(t *testing.T) {
+	scheme := testScheme(t)
+	failingClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(testSchedule(), testDeployment(1)).
+		WithStatusSubresource(&tidev1alpha1.ScalingSchedule{}).
+		WithIndex(&tidev1alpha1.ScalingSchedule{}, targetIndexKey, func(obj client.Object) []string {
+			sched := obj.(*tidev1alpha1.ScalingSchedule)
+			return []string{string(targetKind(sched)) + "/" + sched.Spec.TargetRef.Name}
+		}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				if _, isDeployment := obj.(*appsv1.Deployment); isDeployment {
+					return errors.New("admission webhook denied the request")
+				}
+				return c.Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &ScalingScheduleReconciler{
+		Client:   failingClient,
+		Scheme:   scheme,
+		Recorder: record.NewFakeRecorder(16),
+		Clock:    func() time.Time { return mondayNoon },
+	}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "web-schedule"},
+	})
+	if err == nil {
+		t.Fatal("want the scale failure surfaced as a reconcile error")
+	}
+	// The ready gauge must agree with the Ready=False/ScaleFailed condition.
+	if got := testutil.ToFloat64(scheduleReady.WithLabelValues("default", "web-schedule")); got != 0 {
+		t.Fatalf("want ready gauge 0 after scale failure, got %v", got)
 	}
 }
 

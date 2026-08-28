@@ -366,8 +366,8 @@ func TestEvaluateScaleDownDelayHoldsAfterWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Replicas != 5 || d.WindowName != "business-hours" {
-		t.Fatalf("delay must hold window replicas after end, got %+v", d)
+	if d.Replicas != 5 || d.WindowName != "business-hours" || !d.Held {
+		t.Fatalf("delay must hold window replicas after end (Held=true), got %+v", d)
 	}
 	if want := time.Date(2026, 8, 24, 17, 30, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
 		t.Fatalf("next transition must be end+delay %v, got %v", want, d.NextTransition)
@@ -378,11 +378,72 @@ func TestEvaluateScaleDownDelayHoldsAfterWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d.Replicas != 1 || d.WindowName != "" {
+	if d.Replicas != 1 || d.WindowName != "" || d.Held {
 		t.Fatalf("hold must expire after the delay, got %+v", d)
 	}
 	if want := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
 		t.Fatalf("want next transition at Tuesday's start %v, got %v", want, d.NextTransition)
+	}
+}
+
+func TestEvaluateScaleDownDelayReleasesDefaultHold(t *testing.T) {
+	// The raw decision FALLS at a window start when the window's replicas
+	// are below the default. The hold on the higher default must then
+	// release at start+delay — a transition candidate that was once missing,
+	// which made a 10-minute delay last until the window's end.
+	spec := &tidev1alpha1.ScalingScheduleSpec{
+		DefaultReplicas: 10,
+		ScaleDownDelay:  &metav1.Duration{Duration: 10 * time.Minute},
+		Windows: []tidev1alpha1.ScalingWindow{
+			{Name: "night", Days: days("Mon"), Start: "22:00", End: "06:00", Replicas: 0},
+		},
+	}
+
+	// 22:05: the default is still held, and the hold expires at 22:10.
+	d, err := Evaluate(spec, time.Date(2026, 8, 24, 22, 5, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Replicas != 10 || d.WindowName != "" || !d.Held {
+		t.Fatalf("want default held at 10 (Held=true), got %+v", d)
+	}
+	if want := time.Date(2026, 8, 24, 22, 10, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
+		t.Fatalf("hold must release at start+delay %v, got %v", want, d.NextTransition)
+	}
+
+	// 22:10: the night window takes effect.
+	d, err = Evaluate(spec, time.Date(2026, 8, 24, 22, 10, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Replicas != 0 || d.WindowName != "night" || d.Held {
+		t.Fatalf("want night window in effect at start+delay, got %+v", d)
+	}
+}
+
+func TestEvaluateScaleDownDelayLookbackAcrossSpringForward(t *testing.T) {
+	loc := toronto(t)
+	// A 24h lookback that spans the 23-hour spring-forward day reaches two
+	// civil days back, so a wrapping occurrence can start three civil days
+	// back: Fri 23:45 -> Sat 23:45, delay 24h, evaluated Mon 00:30 EDT.
+	spec := &tidev1alpha1.ScalingScheduleSpec{
+		TimeZone:        "America/Toronto",
+		DefaultReplicas: 1,
+		ScaleDownDelay:  &metav1.Duration{Duration: 24 * time.Hour},
+		Windows: []tidev1alpha1.ScalingWindow{
+			{Name: "weekend-batch", Days: days("Fri"), Start: "23:45", End: "23:45", Replicas: 8},
+		},
+	}
+	d, err := Evaluate(spec, time.Date(2026, 3, 9, 0, 30, 0, 0, loc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Replicas != 8 || d.WindowName != "weekend-batch" || !d.Held {
+		t.Fatalf("lookback across spring-forward must still hold the window, got %+v", d)
+	}
+	// Hold expiry: Sat 23:45 EST end + 24h real = Mon 00:45 EDT = 04:45 UTC.
+	if want := time.Date(2026, 3, 9, 4, 45, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
+		t.Fatalf("want hold expiry %v, got %v", want, d.NextTransition)
 	}
 }
 

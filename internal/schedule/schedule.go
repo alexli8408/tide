@@ -27,6 +27,11 @@ type Decision struct {
 	// DefaultReplicas applies.
 	WindowName string
 
+	// Held is true when Replicas comes from the scale-down delay rather than
+	// the instantaneous schedule: a higher recent value is being held while
+	// it ages out of the lookback.
+	Held bool
+
 	// NextTransition is the earliest instant after "now" at which the
 	// decision could change. It is the zero time when the schedule has no
 	// windows (the decision then never changes until the spec does).
@@ -142,19 +147,22 @@ func Evaluate(spec *tidev1alpha1.ScalingScheduleSpec, now time.Time) (Decision, 
 		for _, s := range samples {
 			if replicas, name := rawAt(s); replicas > decision.Replicas {
 				decision.Replicas, decision.WindowName = replicas, name
+				decision.Held = true
 			}
 		}
 	}
 
 	// The decision can change at any window boundary and, with damping, at
-	// any boundary plus the delay (when a held value ages out of the
-	// lookback). This over-approximates — some candidates change nothing —
-	// and those wakeups are cheap no-ops.
+	// any boundary plus the delay: the raw value can fall at an END (a high
+	// window closing) or at a START (a below-default window opening), and
+	// either fall surfaces only when it ages out of the lookback. This
+	// over-approximates — some candidates change nothing — and those
+	// wakeups are cheap no-ops.
 	var next time.Time
 	for _, wo := range occs {
 		boundaries := []time.Time{wo.occ.start, wo.occ.end}
 		if delay > 0 {
-			boundaries = append(boundaries, wo.occ.end.Add(delay))
+			boundaries = append(boundaries, wo.occ.start.Add(delay), wo.occ.end.Add(delay))
 		}
 		for _, boundary := range boundaries {
 			if boundary.After(now) && (next.IsZero() || boundary.Before(next)) {
@@ -263,8 +271,10 @@ func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
 // occurrences returns every concrete instance of w that could be active now,
 // start within the transition horizon, or have ended within the last 24h
-// (the scaleDownDelay maximum). Offsets start at -2 because a wrapping
-// window can start two civil days before its end falls inside that lookback.
+// (the scaleDownDelay maximum). Offsets start at -3: a wrapping window ends
+// one civil day after it starts, the 24h lookback start can land another day
+// back, and a 23-hour spring-forward day inside the lookback can push it one
+// civil day further still.
 //
 // Instants are built with resolveCivil on civil dates rather than by adding
 // 24-hour durations, so a window's start stays at its wall-clock time across
@@ -275,7 +285,7 @@ func (w *window) occurrences(nowLocal time.Time) []occurrence {
 	loc := nowLocal.Location()
 	occs := make([]occurrence, 0, horizonDays)
 
-	for offset := -2; offset <= horizonDays; offset++ {
+	for offset := -3; offset <= horizonDays; offset++ {
 		// Noon is used to determine the weekday: DST shifts never move noon
 		// across a date boundary, while midnight arithmetic can.
 		weekday := time.Date(year, month, day+offset, 12, 0, 0, 0, loc).Weekday()
