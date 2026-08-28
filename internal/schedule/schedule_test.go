@@ -295,6 +295,75 @@ func TestEvaluateDSTWindowSpanningTransition(t *testing.T) {
 	}
 }
 
+func TestEvaluateWindowEndingInsideDSTGap(t *testing.T) {
+	loc := toronto(t)
+	// On 2026-03-08 the 02:00–02:59 hour does not exist in Toronto. A window
+	// ending at 02:30 must resolve its end forward to the first instant
+	// after the gap (03:00 EDT = 07:00 UTC), not shrink to 01:30 EST.
+	spec := &tidev1alpha1.ScalingScheduleSpec{
+		TimeZone:        "America/Toronto",
+		DefaultReplicas: 1,
+		Windows: []tidev1alpha1.ScalingWindow{
+			{Name: "late-night", Days: days("Sun"), Start: "01:00", End: "02:30", Replicas: 4},
+		},
+	}
+
+	d, err := Evaluate(spec, time.Date(2026, 3, 8, 1, 45, 0, 0, loc)) // 01:45 EST
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Replicas != 4 || d.WindowName != "late-night" {
+		t.Fatalf("window ending in DST gap must stay active until the gap, got %+v", d)
+	}
+	if want := time.Date(2026, 3, 8, 7, 0, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
+		t.Fatalf("gap end must resolve to the transition instant %v, got %v", want, d.NextTransition)
+	}
+}
+
+func TestEvaluateWindowSwallowedByDSTGap(t *testing.T) {
+	loc := toronto(t)
+	// A window lying entirely inside the skipped hour has no real duration
+	// that day: it must not activate, and the next transition must be next
+	// week's occurrence, not an inverted boundary.
+	spec := &tidev1alpha1.ScalingScheduleSpec{
+		TimeZone:        "America/Toronto",
+		DefaultReplicas: 1,
+		Windows: []tidev1alpha1.ScalingWindow{
+			{Name: "gap-only", Days: days("Sun"), Start: "02:15", End: "02:45", Replicas: 9},
+		},
+	}
+
+	for _, now := range []time.Time{
+		time.Date(2026, 3, 8, 1, 0, 0, 0, loc),  // before the gap (EST)
+		time.Date(2026, 3, 8, 3, 10, 0, 0, loc), // after the gap (EDT)
+	} {
+		d, err := Evaluate(spec, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if d.Replicas != 1 || d.WindowName != "" {
+			t.Fatalf("swallowed window must not activate at %v, got %+v", now, d)
+		}
+		// Next Sunday 02:15 EDT = 06:15 UTC.
+		if want := time.Date(2026, 3, 15, 6, 15, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
+			t.Fatalf("next transition must be next week's occurrence %v, got %v", want, d.NextTransition)
+		}
+	}
+}
+
+func TestParseHHMMStrict(t *testing.T) {
+	for _, bad := range []string{"09:5a", " 9:00", "+9:00", "1:234", "12:60", "24:00", "1200", "09-00", "９:00"} {
+		if _, _, err := parseHHMM(bad); err == nil {
+			t.Errorf("parseHHMM(%q) must be rejected", bad)
+		}
+	}
+	for _, good := range []string{"00:00", "09:05", "23:59"} {
+		if _, _, err := parseHHMM(good); err != nil {
+			t.Errorf("parseHHMM(%q) must be accepted: %v", good, err)
+		}
+	}
+}
+
 func TestEvaluateErrors(t *testing.T) {
 	cases := []struct {
 		name    string

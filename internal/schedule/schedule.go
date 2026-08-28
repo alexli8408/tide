@@ -172,23 +172,33 @@ func parseWindows(in []tidev1alpha1.ScalingWindow) ([]window, error) {
 	return out, nil
 }
 
+// parseHHMM accepts exactly "HH:MM" — two digits, a colon, two digits.
+// Sscanf-style parsing is too lenient here (it tolerates signs, spaces, and
+// trailing garbage), so the format is checked byte by byte.
 func parseHHMM(s string) (int, int, error) {
-	var h, m int
-	if _, err := fmt.Sscanf(s, "%02d:%02d", &h, &m); err != nil || h < 0 || h > 23 || m < 0 || m > 59 || len(s) != 5 {
+	valid := len(s) == 5 && s[2] == ':' &&
+		isDigit(s[0]) && isDigit(s[1]) && isDigit(s[3]) && isDigit(s[4])
+	if !valid {
+		return 0, 0, fmt.Errorf("invalid time %q, want 24-hour HH:MM", s)
+	}
+	h := int(s[0]-'0')*10 + int(s[1]-'0')
+	m := int(s[3]-'0')*10 + int(s[4]-'0')
+	if h > 23 || m > 59 {
 		return 0, 0, fmt.Errorf("invalid time %q, want 24-hour HH:MM", s)
 	}
 	return h, m, nil
 }
 
+func isDigit(b byte) bool { return b >= '0' && b <= '9' }
+
 // occurrences returns every concrete instance of w that could be active now
 // or start within the transition horizon. Offsets start at -1 so a window
 // that began yesterday and wraps past midnight is still considered.
 //
-// Instants are built with time.Date on civil dates rather than by adding
+// Instants are built with resolveCivil on civil dates rather than by adding
 // 24-hour durations, so a window's start stays at its wall-clock time across
-// daylight-saving transitions. When a DST jump makes a wall-clock time
-// nonexistent (spring forward) or ambiguous (fall back), time.Date resolves
-// it to a real instant; the window shifts by the size of the gap that day.
+// daylight-saving transitions. An occurrence fully swallowed by a DST gap
+// resolves to zero length and is dropped.
 func (w *window) occurrences(nowLocal time.Time) []occurrence {
 	year, month, day := nowLocal.Date()
 	loc := nowLocal.Location()
@@ -205,10 +215,47 @@ func (w *window) occurrences(nowLocal time.Time) []occurrence {
 		if w.wraps {
 			endOffset++
 		}
-		occs = append(occs, occurrence{
-			start: time.Date(year, month, day+offset, w.startH, w.startM, 0, 0, loc),
-			end:   time.Date(year, month, day+endOffset, w.endH, w.endM, 0, 0, loc),
-		})
+		occ := occurrence{
+			start: resolveCivil(year, month, day+offset, w.startH, w.startM, loc),
+			end:   resolveCivil(year, month, day+endOffset, w.endH, w.endM, loc),
+		}
+		if occ.end.After(occ.start) {
+			occs = append(occs, occ)
+		}
 	}
 	return occs
+}
+
+// resolveCivil returns the instant of the wall-clock time hh:mm on the given
+// civil date in loc. When a DST spring-forward gap makes that wall-clock
+// time nonexistent, time.Date is free to resolve it to either side of the
+// gap (Go resolves 02:30 on a 02:00->03:00 day to 01:30), which would make a
+// window ending inside the gap shrink — or invert and never activate at all.
+// This resolves such times forward to the first instant after the gap
+// instead: a boundary inside the gap lands exactly on the transition.
+func resolveCivil(year int, month time.Month, day, hh, mm int, loc *time.Location) time.Time {
+	t := time.Date(year, month, day, hh, mm, 0, 0, loc)
+	if t.Hour() == hh && t.Minute() == mm {
+		return t
+	}
+	return transitionAfter(t.Add(-24 * time.Hour))
+}
+
+// transitionAfter binary-searches the first instant within 48h of lo at
+// which loc's UTC offset differs from lo's — the DST transition instant.
+// The caller guarantees exactly one transition lies in that range.
+func transitionAfter(lo time.Time) time.Time {
+	hi := lo.Add(48 * time.Hour)
+	_, offLo := lo.Zone()
+	for hi.Sub(lo) > time.Minute {
+		mid := lo.Add(hi.Sub(lo) / 2)
+		if _, off := mid.Zone(); off == offLo {
+			lo = mid
+		} else {
+			hi = mid
+		}
+	}
+	// Real transitions happen on whole minutes; hi is within a minute past
+	// the transition, so truncating lands exactly on it.
+	return hi.Truncate(time.Minute)
 }
