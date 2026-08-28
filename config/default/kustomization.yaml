@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../crd/bases/tide.alexli8408.github.io_scalingschedules.yaml
+  - ../rbac/service_account.yaml
+  - ../rbac/role.yaml
+  - ../rbac/role_binding.yaml
+  - ../rbac/leader_election_role.yaml
+  - ../manager/manager.yaml

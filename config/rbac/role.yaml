@@ -1,0 +1,40 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: tide-manager-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - apps
+  resources:
+  - deployments
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - tide.alexli8408.github.io
+  resources:
+  - scalingschedules
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - tide.alexli8408.github.io
+  resources:
+  - scalingschedules/status
+  verbs:
+  - get
+  - patch
+  - update

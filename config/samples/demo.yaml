@@ -1,0 +1,49 @@
+# A demo workload plus a schedule that keeps it at 5 replicas during
+# Toronto business hours, 3 for a Friday-evening batch run, and 1 the
+# rest of the time. Apply, then watch:
+#
+#   kubectl apply -f config/samples/demo.yaml
+#   kubectl get ssc web-hours -w
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  labels:
+    app: web
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+---
+apiVersion: tide.alexli8408.github.io/v1alpha1
+kind: ScalingSchedule
+metadata:
+  name: web-hours
+spec:
+  targetRef:
+    kind: Deployment
+    name: web
+  timeZone: America/Toronto
+  defaultReplicas: 1
+  windows:
+    - name: business-hours
+      days: [Mon, Tue, Wed, Thu, Fri]
+      start: "08:30"
+      end: "18:00"
+      replicas: 5
+    - name: friday-batch
+      days: [Fri]
+      start: "22:00"
+      end: "02:00"
+      replicas: 3
