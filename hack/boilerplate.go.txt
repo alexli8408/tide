@@ -1,0 +1,4 @@
+/*
+Copyright 2026 Alex Li.
+Licensed under the MIT License.
+*/

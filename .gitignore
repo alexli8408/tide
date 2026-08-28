@@ -1,0 +1,23 @@
+# Binaries
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+cover.out
+cover.html
+
+# Test binaries
+*.test
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Editor/OS noise
+.idea/
+.vscode/
+.DS_Store
+
+# Kubebuilder envtest binaries
+testbin/
