@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	appsv1 "k8s.io/api/apps/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -371,6 +372,35 @@ func TestReconcileStatefulSetTarget(t *testing.T) {
 	}
 	if *got.Spec.Replicas != 5 {
 		t.Fatalf("want statefulset scaled to 5, got %d", *got.Spec.Replicas)
+	}
+}
+
+func TestMetricsRecorded(t *testing.T) {
+	// The registry is process-global, so counters are asserted as deltas.
+	upBefore := testutil.ToFloat64(scaleOperations.WithLabelValues("default", "web-schedule", "up"))
+	r, _ := newReconciler(t, mondayNoon, testSchedule(), testDeployment(1))
+	reconcileOnce(t, r)
+
+	if delta := testutil.ToFloat64(scaleOperations.WithLabelValues("default", "web-schedule", "up")) - upBefore; delta != 1 {
+		t.Fatalf("want one scale-up counted, got delta %v", delta)
+	}
+	if got := testutil.ToFloat64(desiredReplicas.WithLabelValues("default", "web-schedule")); got != 5 {
+		t.Fatalf("want desired-replicas gauge 5, got %v", got)
+	}
+	if got := testutil.ToFloat64(scheduleReady.WithLabelValues("default", "web-schedule")); got != 1 {
+		t.Fatalf("want ready gauge 1, got %v", got)
+	}
+
+	// Reconciling the deleted schedule retires its gauge series.
+	seriesBefore := testutil.CollectAndCount(desiredReplicas)
+	rEmpty, _ := newReconciler(t, mondayNoon)
+	if _, err := rEmpty.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "web-schedule"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := testutil.CollectAndCount(desiredReplicas); got != seriesBefore-1 {
+		t.Fatalf("deletion must retire the gauge series: %d before, %d after", seriesBefore, got)
 	}
 }
 

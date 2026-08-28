@@ -70,8 +70,13 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	if err := r.Get(ctx, req.NamespacedName, &sched); err != nil {
 		// Deleted schedules need no cleanup: Tide owns nothing. The target
 		// keeps whatever replica count it last had, which is the least
-		// surprising behaviour for an operator being removed.
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		// surprising behaviour for an operator being removed. Only the
+		// schedule's metric series are dropped.
+		if apierrors.IsNotFound(err) {
+			forgetSchedule(req.Namespace, req.Name)
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
 	}
 	base := sched.DeepCopy()
 	now := r.now()
@@ -87,6 +92,7 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		sched.Status.NextTransitionTime = nil
 		r.warnOnce(&sched, tidev1alpha1.ReasonInvalidSchedule, err.Error())
 		r.setReady(&sched, metav1.ConditionFalse, tidev1alpha1.ReasonInvalidSchedule, err.Error())
+		recordInvalid(sched.Namespace, sched.Name)
 		return ctrl.Result{}, r.patchStatus(ctx, &sched, base)
 	}
 
@@ -111,6 +117,7 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			targetKind(&sched), sched.Spec.TargetRef.Name, winner)
 		r.warnOnce(&sched, tidev1alpha1.ReasonConflictingTarget, msg)
 		r.setReady(&sched, metav1.ConditionFalse, tidev1alpha1.ReasonConflictingTarget, msg)
+		recordDecision(sched.Namespace, sched.Name, decision.Replicas, false)
 		return r.resultFor(decision, now), r.patchStatus(ctx, &sched, base)
 	}
 
@@ -121,6 +128,7 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		msg := fmt.Sprintf("target %s %q not found", targetKind(&sched), sched.Spec.TargetRef.Name)
 		r.warnOnce(&sched, tidev1alpha1.ReasonTargetNotFound, msg)
 		r.setReady(&sched, metav1.ConditionFalse, tidev1alpha1.ReasonTargetNotFound, msg)
+		recordDecision(sched.Namespace, sched.Name, decision.Replicas, false)
 		return r.resultFor(decision, now), r.patchStatus(ctx, &sched, base)
 	} else if err != nil {
 		return ctrl.Result{}, err
@@ -145,6 +153,7 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			return ctrl.Result{}, err
 		}
 		reason := reasonFor(decision)
+		recordScale(sched.Namespace, sched.Name, current, decision.Replicas)
 		r.Recorder.Eventf(&sched, corev1.EventTypeNormal, "Scaled",
 			"scaled %s %q from %d to %d replicas (%s)",
 			targetKind(&sched), sched.Spec.TargetRef.Name, current, decision.Replicas, reason)
@@ -158,6 +167,7 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 			fmt.Sprintf("target at %d replicas as scheduled", current))
 	}
 
+	recordDecision(sched.Namespace, sched.Name, decision.Replicas, true)
 	return r.resultFor(decision, now), r.patchStatus(ctx, &sched, base)
 }
 
