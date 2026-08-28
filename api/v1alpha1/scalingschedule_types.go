@@ -106,11 +106,12 @@ const (
 	// target's replica count matches the schedule.
 	ConditionReady = "Ready"
 
-	ReasonReconciled      = "Reconciled"
-	ReasonSuspended       = "Suspended"
-	ReasonTargetNotFound  = "TargetNotFound"
-	ReasonInvalidSchedule = "InvalidSchedule"
-	ReasonScaleFailed     = "ScaleFailed"
+	ReasonReconciled        = "Reconciled"
+	ReasonSuspended         = "Suspended"
+	ReasonTargetNotFound    = "TargetNotFound"
+	ReasonInvalidSchedule   = "InvalidSchedule"
+	ReasonScaleFailed       = "ScaleFailed"
+	ReasonConflictingTarget = "ConflictingTarget"
 )
 
 // ScalingScheduleStatus is the observed state of a ScalingSchedule.

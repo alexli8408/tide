@@ -257,6 +257,103 @@ func TestReconcileInvalidSpec(t *testing.T) {
 	}
 }
 
+func TestReconcileConflictingSchedulesElectOldest(t *testing.T) {
+	older := testSchedule(func(s *tidev1alpha1.ScalingSchedule) {
+		s.Name = "older-schedule"
+		s.CreationTimestamp = metav1.NewTime(mondayNoon.Add(-2 * time.Hour))
+	})
+	newer := testSchedule(func(s *tidev1alpha1.ScalingSchedule) {
+		s.Name = "web-schedule"
+		s.CreationTimestamp = metav1.NewTime(mondayNoon.Add(-1 * time.Hour))
+	})
+	r, recorder := newReconciler(t, mondayNoon, older, newer, testDeployment(1))
+
+	// Reconciling the newer schedule must not touch the deployment.
+	reconcileOnce(t, r)
+	if got := *getDeployment(t, r.Client).Spec.Replicas; got != 1 {
+		t.Fatalf("losing schedule must not scale, got %d replicas", got)
+	}
+	sched := getSchedule(t, r.Client)
+	cond := meta.FindStatusCondition(sched.Status.Conditions, tidev1alpha1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != tidev1alpha1.ReasonConflictingTarget {
+		t.Fatalf("want Ready=False/ConflictingTarget on the loser, got %+v", cond)
+	}
+	if events := drainEvents(recorder); len(events) != 1 || !strings.Contains(events[0], "older-schedule") {
+		t.Fatalf("want one conflict warning naming the winner, got %v", events)
+	}
+
+	// A second pass (e.g. self-triggered by the status patch) must not
+	// duplicate the warning event.
+	reconcileOnce(t, r)
+	if events := drainEvents(recorder); len(events) != 0 {
+		t.Fatalf("conflict warning must not repeat, got %v", events)
+	}
+
+	// The winner still scales normally.
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "default", Name: "older-schedule"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := *getDeployment(t, r.Client).Spec.Replicas; got != 5 {
+		t.Fatalf("winning schedule must scale to 5, got %d", got)
+	}
+	if result.RequeueAfter == 0 {
+		t.Fatal("winner must keep its boundary requeue")
+	}
+}
+
+func TestReconcileConflictTieBrokenByName(t *testing.T) {
+	ts := metav1.NewTime(mondayNoon.Add(-1 * time.Hour))
+	first := testSchedule(func(s *tidev1alpha1.ScalingSchedule) {
+		s.Name = "a-schedule"
+		s.CreationTimestamp = ts
+	})
+	second := testSchedule(func(s *tidev1alpha1.ScalingSchedule) {
+		s.Name = "web-schedule"
+		s.CreationTimestamp = ts
+	})
+	r, _ := newReconciler(t, mondayNoon, first, second, testDeployment(1))
+
+	reconcileOnce(t, r) // reconciles "web-schedule", which loses the tie
+	sched := getSchedule(t, r.Client)
+	cond := meta.FindStatusCondition(sched.Status.Conditions, tidev1alpha1.ConditionReady)
+	if cond == nil || cond.Reason != tidev1alpha1.ReasonConflictingTarget || !strings.Contains(cond.Message, "a-schedule") {
+		t.Fatalf("equal timestamps must elect the lexicographically first name, got %+v", cond)
+	}
+}
+
+func TestReconcileInvalidSpecClearsDecisionFields(t *testing.T) {
+	r, _ := newReconciler(t, mondayNoon, testSchedule(), testDeployment(1))
+	reconcileOnce(t, r)
+	if sched := getSchedule(t, r.Client); sched.Status.DesiredReplicas == nil {
+		t.Fatal("precondition: valid reconcile must populate status")
+	}
+
+	// Break the spec and reconcile again: stale decision fields must clear.
+	sched := getSchedule(t, r.Client)
+	sched.Spec.TimeZone = "Mars/Olympus"
+	if err := r.Update(context.Background(), sched); err != nil {
+		t.Fatal(err)
+	}
+	reconcileOnce(t, r)
+
+	sched = getSchedule(t, r.Client)
+	if sched.Status.DesiredReplicas != nil || sched.Status.ActiveWindow != "" || sched.Status.NextTransitionTime != nil {
+		t.Fatalf("invalid spec must clear decision fields, got %+v", sched.Status)
+	}
+}
+
+func TestReconcileTargetNotFoundWarnsOnce(t *testing.T) {
+	r, recorder := newReconciler(t, mondayNoon, testSchedule())
+	reconcileOnce(t, r)
+	reconcileOnce(t, r)
+	if events := drainEvents(recorder); len(events) != 1 {
+		t.Fatalf("repeated reconciles with an unchanged condition must emit one warning, got %v", events)
+	}
+}
+
 func TestReconcileStatefulSetTarget(t *testing.T) {
 	sts := &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{Name: "db", Namespace: "default"},

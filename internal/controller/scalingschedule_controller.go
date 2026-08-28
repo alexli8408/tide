@@ -79,8 +79,13 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 	decision, err := schedule.Evaluate(&sched.Spec, now)
 	if err != nil {
 		// An invalid spec cannot be retried into validity; wait for an edit.
+		// Decision fields are cleared so status never shows values computed
+		// from a previous, valid generation of the spec.
 		log.Error(err, "invalid schedule")
-		r.Recorder.Event(&sched, corev1.EventTypeWarning, tidev1alpha1.ReasonInvalidSchedule, err.Error())
+		sched.Status.DesiredReplicas = nil
+		sched.Status.ActiveWindow = ""
+		sched.Status.NextTransitionTime = nil
+		r.warnOnce(&sched, tidev1alpha1.ReasonInvalidSchedule, err.Error())
 		r.setReady(&sched, metav1.ConditionFalse, tidev1alpha1.ReasonInvalidSchedule, err.Error())
 		return ctrl.Result{}, r.patchStatus(ctx, &sched, base)
 	}
@@ -93,12 +98,28 @@ func (r *ScalingScheduleReconciler) Reconcile(ctx context.Context, req ctrl.Requ
 		sched.Status.NextTransitionTime = &metav1.Time{Time: decision.NextTransition}
 	}
 
+	// Exactly one schedule may manage a given workload. When several claim
+	// the same target they would revert each other's scaling forever, so the
+	// oldest (ties broken by name) wins deterministically and the rest go
+	// Ready=False without touching the target.
+	winner, err := r.conflictWinner(ctx, &sched)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if winner != sched.Name {
+		msg := fmt.Sprintf("target %s %q is already managed by older ScalingSchedule %q; this schedule is inactive",
+			targetKind(&sched), sched.Spec.TargetRef.Name, winner)
+		r.warnOnce(&sched, tidev1alpha1.ReasonConflictingTarget, msg)
+		r.setReady(&sched, metav1.ConditionFalse, tidev1alpha1.ReasonConflictingTarget, msg)
+		return r.resultFor(decision, now), r.patchStatus(ctx, &sched, base)
+	}
+
 	target, replicas, err := r.getTarget(ctx, &sched)
 	if apierrors.IsNotFound(err) {
 		// No requeue needed for this case alone: the workload watch enqueues
 		// this schedule the moment its target appears.
 		msg := fmt.Sprintf("target %s %q not found", targetKind(&sched), sched.Spec.TargetRef.Name)
-		r.Recorder.Event(&sched, corev1.EventTypeWarning, tidev1alpha1.ReasonTargetNotFound, msg)
+		r.warnOnce(&sched, tidev1alpha1.ReasonTargetNotFound, msg)
 		r.setReady(&sched, metav1.ConditionFalse, tidev1alpha1.ReasonTargetNotFound, msg)
 		return r.resultFor(decision, now), r.patchStatus(ctx, &sched, base)
 	} else if err != nil {
@@ -189,6 +210,39 @@ func reasonFor(decision schedule.Decision) string {
 		return "no active window, applying default replicas"
 	}
 	return fmt.Sprintf("window %q active", decision.WindowName)
+}
+
+// conflictWinner returns the name of the schedule entitled to manage this
+// schedule's target: the oldest by creation time among all schedules in the
+// namespace indexing the same target, ties broken by name.
+func (r *ScalingScheduleReconciler) conflictWinner(ctx context.Context, sched *tidev1alpha1.ScalingSchedule) (string, error) {
+	var claimants tidev1alpha1.ScalingScheduleList
+	err := r.List(ctx, &claimants,
+		client.InNamespace(sched.Namespace),
+		client.MatchingFields{targetIndexKey: string(targetKind(sched)) + "/" + sched.Spec.TargetRef.Name})
+	if err != nil {
+		return "", fmt.Errorf("listing schedules for conflict check: %w", err)
+	}
+	winner := sched
+	for i := range claimants.Items {
+		c := &claimants.Items[i]
+		older := c.CreationTimestamp.Time.Before(winner.CreationTimestamp.Time)
+		tieButFirst := c.CreationTimestamp.Time.Equal(winner.CreationTimestamp.Time) && c.Name < winner.Name
+		if older || tieButFirst {
+			winner = c
+		}
+	}
+	return winner.Name, nil
+}
+
+// warnOnce emits a Warning event only if it would change the Ready
+// condition. Without this, the reconcile triggered by our own status patch
+// would duplicate every warning.
+func (r *ScalingScheduleReconciler) warnOnce(sched *tidev1alpha1.ScalingSchedule, reason, message string) {
+	cond := meta.FindStatusCondition(sched.Status.Conditions, tidev1alpha1.ConditionReady)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != reason || cond.Message != message {
+		r.Recorder.Event(sched, corev1.EventTypeWarning, reason, message)
+	}
 }
 
 func (r *ScalingScheduleReconciler) setReady(sched *tidev1alpha1.ScalingSchedule, status metav1.ConditionStatus, reason, message string) {

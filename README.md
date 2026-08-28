@@ -55,8 +55,11 @@ flowchart LR
   back to its schedule through the index and is reverted immediately.
 - **Timezone- and DST-correct.** Windows are wall-clock times in an IANA
   timezone. Occurrences are built with civil-date arithmetic (never "+24h"),
-  so a 09:00 start stays 09:00 across daylight-saving transitions; the tzdata
-  database is compiled into the binary for distroless images.
+  so a 09:00 start stays 09:00 across daylight-saving transitions; a boundary
+  falling inside a spring-forward gap resolves forward to the transition
+  instant, so windows touching the skipped hour shrink by the gap instead of
+  silently inverting. The tzdata database is compiled into the binary for
+  distroless images.
 - **Safe overlap semantics.** When windows overlap, the highest replica count
   wins — no window can accidentally scale below what another demands.
 - **Honest status.** Conditions (`Ready` with typed reasons), the active
@@ -137,6 +140,10 @@ config/              CRD, RBAC, manager manifests, samples
   up is a liability, not a feature.
 - **Same-namespace targets only.** The API shape itself rules out
   cross-namespace privilege escalation.
+- **One schedule per target.** If several schedules claim the same workload,
+  they would revert each other's scaling forever. The oldest schedule (ties
+  broken by name) wins deterministically; the rest report
+  `Ready=False / ConflictingTarget` and never touch the target.
 - **Start/end windows instead of cron.** One window is one declarative
   statement; a cron up/down pair can drift apart and has no natural answer
   for "what should replicas be *right now*" after a controller restart.
