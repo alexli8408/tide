@@ -31,8 +31,8 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: test
-test: fmt vet ## Run tests.
-	go test ./... -coverprofile cover.out
+test: fmt vet ## Run tests with the race detector, matching CI.
+	go test ./... -race -coverprofile cover.out
 
 .PHONY: cover
 cover: test ## Open an HTML coverage report.

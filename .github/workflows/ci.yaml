@@ -12,8 +12,8 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Build
@@ -29,18 +29,22 @@ jobs:
     name: Generated code is in sync
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - name: Regenerate deepcopy, CRD, RBAC
         run: make generate
       - name: Fail if generation changed anything
-        run: git diff --exit-code -- api config
+        # git add -N registers newly created files so the diff catches them
+        # too; plain git diff ignores untracked files.
+        run: |
+          git add -N api config
+          git diff --exit-code -- api config
 
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build image
         run: docker build -t tide:ci .
