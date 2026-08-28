@@ -1,6 +1,6 @@
 # Image URL to use for docker build/push targets
 IMG ?= ghcr.io/alexli8408/tide:latest
-CONTROLLER_GEN_VERSION ?= v0.19.0
+CONTROLLER_GEN_VERSION ?= v0.21.0
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
