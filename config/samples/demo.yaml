@@ -36,6 +36,7 @@ spec:
     name: web
   timeZone: America/Toronto
   defaultReplicas: 1
+  scaleDownDelay: "15m"
   windows:
     - name: business-hours
       days: [Mon, Tue, Wed, Thu, Fri]

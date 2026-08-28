@@ -70,16 +70,25 @@ type occurrence struct {
 	end   time.Time
 }
 
+// windowOccurrence pairs a parsed window with one concrete occurrence.
+type windowOccurrence struct {
+	w   *window
+	occ occurrence
+}
+
 // Evaluate returns the Decision for spec at the instant now. It returns an
 // error only for specs that are invalid in ways CRD validation cannot catch
-// statically (unknown timezone, duplicate window names).
+// statically (unknown timezone, duplicate window names, bad scaleDownDelay).
 func Evaluate(spec *tidev1alpha1.ScalingScheduleSpec, now time.Time) (Decision, error) {
 	loc, err := loadLocation(spec.TimeZone)
 	if err != nil {
 		return Decision{}, err
 	}
-
 	windows, err := parseWindows(spec.Windows)
+	if err != nil {
+		return Decision{}, err
+	}
+	delay, err := scaleDownDelay(spec)
 	if err != nil {
 		return Decision{}, err
 	}
@@ -90,24 +99,66 @@ func Evaluate(spec *tidev1alpha1.ScalingScheduleSpec, now time.Time) (Decision, 
 	}
 
 	nowLocal := now.In(loc)
-	var next time.Time
-	active := false
+	var occs []windowOccurrence
+	for i := range windows {
+		for _, occ := range windows[i].occurrences(nowLocal) {
+			occs = append(occs, windowOccurrence{w: &windows[i], occ: occ})
+		}
+	}
 
-	for _, w := range windows {
-		for _, occ := range w.occurrences(nowLocal) {
-			if !now.Before(occ.start) && now.Before(occ.end) {
-				// Highest replica count wins among overlapping windows;
-				// ties keep the first window in spec order.
-				if !active || w.replicas > decision.Replicas {
-					decision.Replicas = w.replicas
-					decision.WindowName = w.name
+	// rawAt is the undamped decision at t: the highest replica count among
+	// windows active at t (ties keep spec order), or DefaultReplicas.
+	rawAt := func(t time.Time) (int32, string) {
+		replicas, name, active := spec.DefaultReplicas, "", false
+		for _, wo := range occs {
+			if !t.Before(wo.occ.start) && t.Before(wo.occ.end) {
+				if !active || wo.w.replicas > replicas {
+					replicas, name = wo.w.replicas, wo.w.name
 				}
 				active = true
 			}
-			for _, boundary := range []time.Time{occ.start, occ.end} {
-				if boundary.After(now) && (next.IsZero() || boundary.Before(next)) {
-					next = boundary
+		}
+		return replicas, name
+	}
+
+	decision.Replicas, decision.WindowName = rawAt(now)
+
+	if delay > 0 {
+		// Scale-down damping is a sliding-window maximum: the decision is
+		// the highest raw value over [now-delay, now], so it may only fall
+		// once it has been lower for the whole delay — while scale-ups pass
+		// through immediately. The raw value is piecewise constant, so the
+		// max is found by sampling the lookback start plus every window
+		// boundary inside the lookback.
+		lookbackStart := now.Add(-delay)
+		samples := []time.Time{lookbackStart}
+		for _, wo := range occs {
+			for _, b := range []time.Time{wo.occ.start, wo.occ.end} {
+				if b.After(lookbackStart) && !b.After(now) {
+					samples = append(samples, b)
 				}
+			}
+		}
+		for _, s := range samples {
+			if replicas, name := rawAt(s); replicas > decision.Replicas {
+				decision.Replicas, decision.WindowName = replicas, name
+			}
+		}
+	}
+
+	// The decision can change at any window boundary and, with damping, at
+	// any boundary plus the delay (when a held value ages out of the
+	// lookback). This over-approximates — some candidates change nothing —
+	// and those wakeups are cheap no-ops.
+	var next time.Time
+	for _, wo := range occs {
+		boundaries := []time.Time{wo.occ.start, wo.occ.end}
+		if delay > 0 {
+			boundaries = append(boundaries, wo.occ.end.Add(delay))
+		}
+		for _, boundary := range boundaries {
+			if boundary.After(now) && (next.IsZero() || boundary.Before(next)) {
+				next = boundary
 			}
 		}
 	}
@@ -121,8 +172,27 @@ func Validate(spec *tidev1alpha1.ScalingScheduleSpec) error {
 	if _, err := loadLocation(spec.TimeZone); err != nil {
 		return err
 	}
-	_, err := parseWindows(spec.Windows)
+	if _, err := parseWindows(spec.Windows); err != nil {
+		return err
+	}
+	_, err := scaleDownDelay(spec)
 	return err
+}
+
+// scaleDownDelay validates and returns the spec's scale-down damping. The
+// 24h cap keeps the occurrence lookback bounded (see occurrences).
+func scaleDownDelay(spec *tidev1alpha1.ScalingScheduleSpec) (time.Duration, error) {
+	if spec.ScaleDownDelay == nil {
+		return 0, nil
+	}
+	d := spec.ScaleDownDelay.Duration
+	if d < 0 {
+		return 0, fmt.Errorf("scaleDownDelay must not be negative, got %s", d)
+	}
+	if d > 24*time.Hour {
+		return 0, fmt.Errorf("scaleDownDelay must be at most 24h, got %s", d)
+	}
+	return d, nil
 }
 
 func loadLocation(name string) (*time.Location, error) {
@@ -191,9 +261,10 @@ func parseHHMM(s string) (int, int, error) {
 
 func isDigit(b byte) bool { return b >= '0' && b <= '9' }
 
-// occurrences returns every concrete instance of w that could be active now
-// or start within the transition horizon. Offsets start at -1 so a window
-// that began yesterday and wraps past midnight is still considered.
+// occurrences returns every concrete instance of w that could be active now,
+// start within the transition horizon, or have ended within the last 24h
+// (the scaleDownDelay maximum). Offsets start at -2 because a wrapping
+// window can start two civil days before its end falls inside that lookback.
 //
 // Instants are built with resolveCivil on civil dates rather than by adding
 // 24-hour durations, so a window's start stays at its wall-clock time across
@@ -204,7 +275,7 @@ func (w *window) occurrences(nowLocal time.Time) []occurrence {
 	loc := nowLocal.Location()
 	occs := make([]occurrence, 0, horizonDays)
 
-	for offset := -1; offset <= horizonDays; offset++ {
+	for offset := -2; offset <= horizonDays; offset++ {
 		// Noon is used to determine the weekday: DST shifts never move noon
 		// across a date boundary, while midnight arithmetic can.
 		weekday := time.Date(year, month, day+offset, 12, 0, 0, 0, loc).Weekday()

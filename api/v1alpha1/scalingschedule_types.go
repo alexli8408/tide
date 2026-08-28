@@ -93,6 +93,13 @@ type ScalingScheduleSpec struct {
 	// +kubebuilder:validation:MaxItems=32
 	Windows []ScalingWindow `json:"windows,omitempty"`
 
+	// ScaleDownDelay keeps the higher replica count for this long after the
+	// schedule calls for fewer replicas — a cool-down that avoids churn at
+	// window boundaries and lets in-flight work drain. Scale-ups are never
+	// delayed. A duration string like "10m" or "1h30m", at most 24h.
+	// +optional
+	ScaleDownDelay *metav1.Duration `json:"scaleDownDelay,omitempty"`
+
 	// Suspend stops the controller from scaling the target while true.
 	// Status is still reported so a suspended schedule shows what it *would*
 	// do.

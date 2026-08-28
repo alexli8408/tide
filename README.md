@@ -65,6 +65,15 @@ flowchart LR
 - **Honest status.** Conditions (`Ready` with typed reasons), the active
   window, desired replicas, and the next transition are published on the
   status subresource and surfaced as `kubectl get` printer columns.
+- **Scale-down damping.** `scaleDownDelay` implements a sliding-window
+  maximum over the schedule's decision: replicas may only fall once the
+  schedule has called for fewer for the whole delay, while scale-ups always
+  apply immediately. This avoids churn at window boundaries and lets
+  in-flight work drain.
+- **Prometheus metrics.** `tide_scale_operations_total`,
+  `tide_desired_replicas`, and `tide_schedule_ready` are served from the
+  manager's `/metrics` endpoint, with gauge series retired when schedules
+  are deleted.
 
 ## Spec reference
 
@@ -76,6 +85,7 @@ flowchart LR
 | `windows[].days` | `Mon`…`Sun`; a wrapping window belongs to its start day |
 | `windows[].start`/`end` | 24h `"HH:MM"`; `end <= start` wraps past midnight |
 | `windows[].replicas` | Replica count while the window is active |
+| `scaleDownDelay` | Hold the higher count this long after a window ends (max 24h); scale-ups are never delayed |
 | `suspend` | Stop scaling but keep evaluating and reporting status |
 
 Invalid specs (bad timezone, malformed times) are rejected by CRD validation
@@ -152,10 +162,10 @@ config/              CRD, RBAC, manager manifests, samples
 
 ## Roadmap
 
-- [ ] Grace periods: ramp down N minutes after a window ends
+- [x] Grace periods: `scaleDownDelay` holds replicas after a window ends
+- [x] Prometheus metrics for scale operations and schedule state
 - [ ] `scale` subresource support to target any scalable CRD
 - [ ] Validating webhook for cross-field checks at admission time
-- [ ] Prometheus metrics for scale operations and schedule drift
 - [ ] Helm chart
 
 ## License

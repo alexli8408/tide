@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	tidev1alpha1 "github.com/alexli8408/tide/api/v1alpha1"
 )
 
@@ -347,6 +349,104 @@ func TestEvaluateWindowSwallowedByDSTGap(t *testing.T) {
 		// Next Sunday 02:15 EDT = 06:15 UTC.
 		if want := time.Date(2026, 3, 15, 6, 15, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
 			t.Fatalf("next transition must be next week's occurrence %v, got %v", want, d.NextTransition)
+		}
+	}
+}
+
+func TestEvaluateScaleDownDelayHoldsAfterWindow(t *testing.T) {
+	delay := &metav1.Duration{Duration: 30 * time.Minute}
+	spec := &tidev1alpha1.ScalingScheduleSpec{
+		DefaultReplicas: 1,
+		ScaleDownDelay:  delay,
+		Windows:         []tidev1alpha1.ScalingWindow{businessHours(5)},
+	}
+
+	// 17:15 Monday: the window ended at 17:00 but the delay holds 5.
+	d, err := Evaluate(spec, time.Date(2026, 8, 24, 17, 15, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Replicas != 5 || d.WindowName != "business-hours" {
+		t.Fatalf("delay must hold window replicas after end, got %+v", d)
+	}
+	if want := time.Date(2026, 8, 24, 17, 30, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
+		t.Fatalf("next transition must be end+delay %v, got %v", want, d.NextTransition)
+	}
+
+	// 17:45: the hold has aged out; back to default.
+	d, err = Evaluate(spec, time.Date(2026, 8, 24, 17, 45, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Replicas != 1 || d.WindowName != "" {
+		t.Fatalf("hold must expire after the delay, got %+v", d)
+	}
+	if want := time.Date(2026, 8, 25, 9, 0, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
+		t.Fatalf("want next transition at Tuesday's start %v, got %v", want, d.NextTransition)
+	}
+}
+
+func TestEvaluateScaleDownDelayNeverDelaysScaleUp(t *testing.T) {
+	// A low-replica window ends and the schedule returns to a HIGHER
+	// default: that is a scale-up and must not be held back by the delay.
+	spec := &tidev1alpha1.ScalingScheduleSpec{
+		DefaultReplicas: 3,
+		ScaleDownDelay:  &metav1.Duration{Duration: time.Hour},
+		Windows: []tidev1alpha1.ScalingWindow{
+			{Name: "quiet-night", Days: days("Mon"), Start: "00:00", End: "06:00", Replicas: 0},
+		},
+	}
+	d, err := Evaluate(spec, time.Date(2026, 8, 24, 6, 15, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Replicas != 3 || d.WindowName != "" {
+		t.Fatalf("scale-up must be immediate despite delay, got %+v", d)
+	}
+}
+
+func TestEvaluateScaleDownDelayAcrossMidnightWrap(t *testing.T) {
+	// Wrap window Sun 22:00–Mon 02:00 with a 24h delay, evaluated Tuesday
+	// 00:30: the occurrence starts two civil days back, ends 22.5h before
+	// now, and must still be held by the lookback.
+	spec := &tidev1alpha1.ScalingScheduleSpec{
+		DefaultReplicas: 1,
+		ScaleDownDelay:  &metav1.Duration{Duration: 24 * time.Hour},
+		Windows: []tidev1alpha1.ScalingWindow{
+			{Name: "sunday-batch", Days: days("Sun"), Start: "22:00", End: "02:00", Replicas: 6},
+		},
+	}
+	d, err := Evaluate(spec, time.Date(2026, 9, 1, 0, 30, 0, 0, time.UTC)) // Tue
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Replicas != 6 || d.WindowName != "sunday-batch" {
+		t.Fatalf("24h delay must hold a wrap window that ended Monday 02:00, got %+v", d)
+	}
+	// The hold ages out at Mon 02:00 + 24h = Tue 02:00.
+	if want := time.Date(2026, 9, 1, 2, 0, 0, 0, time.UTC); !d.NextTransition.Equal(want) {
+		t.Fatalf("want hold expiry %v, got %v", want, d.NextTransition)
+	}
+}
+
+func TestScaleDownDelayValidation(t *testing.T) {
+	for _, tc := range []struct {
+		delay   time.Duration
+		wantErr bool
+	}{
+		{-time.Minute, true},
+		{25 * time.Hour, true},
+		{24 * time.Hour, false},
+		{0, false},
+	} {
+		spec := &tidev1alpha1.ScalingScheduleSpec{
+			DefaultReplicas: 1,
+			ScaleDownDelay:  &metav1.Duration{Duration: tc.delay},
+			Windows:         []tidev1alpha1.ScalingWindow{businessHours(5)},
+		}
+		err := Validate(spec)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("Validate with delay %v: wantErr=%v, got %v", tc.delay, tc.wantErr, err)
 		}
 	}
 }

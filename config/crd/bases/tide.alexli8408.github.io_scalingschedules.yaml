@@ -68,6 +68,13 @@ spec:
                 format: int32
                 minimum: 0
                 type: integer
+              scaleDownDelay:
+                description: |-
+                  ScaleDownDelay keeps the higher replica count for this long after the
+                  schedule calls for fewer replicas — a cool-down that avoids churn at
+                  window boundaries and lets in-flight work drain. Scale-ups are never
+                  delayed. A duration string like "10m" or "1h30m", at most 24h.
+                type: string
               suspend:
                 description: |-
                   Suspend stops the controller from scaling the target while true.
