@@ -41,6 +41,10 @@ jobs:
         run: |
           git add -N api config
           git diff --exit-code -- api config
+      - name: Kustomize overlay builds
+        # Regression check for the load-restrictor breakage that once made
+        # 'make deploy' fail; kubectl ships on the ubuntu runner image.
+        run: kubectl kustomize config/default > /dev/null
 
   docker:
     runs-on: ubuntu-latest
